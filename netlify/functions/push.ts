@@ -1,64 +1,96 @@
+// @ts-ignore
 import { Handler } from '@netlify/functions';
+// @ts-ignore
 import webpush from 'web-push';
 
-const PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'BEI_Cnmy5UkJOnT2dMcDstwoHkaKcQEDvhDbo-v9qoIyB_9yTOHu-nuUOdCy7NnBBS8AI0oGYaxNQMtYLQLq9Je4';
-const PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'zpUDevBFx7pL81cCVtSX30-LqsYONupCNhKTHVNKhYw';
+const PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 
-webpush.setVapidDetails(
-    'mailto:example@yourdomain.com',
-    PUBLIC_KEY,
-    PRIVATE_KEY
-);
+if (PUBLIC_KEY && PRIVATE_KEY) {
+    webpush.setVapidDetails('mailto:example@yourdomain.com', PUBLIC_KEY, PRIVATE_KEY);
+}
 
-// Simple in-memory registry (clears on function restart)
-const registry: Record<string, any[]> = {};
+// Memory store for the two users
+// In production, this clears when the function goes cold, 
+// but it works for active sessions.
+interface UserStatus {
+    subscription: any | null;
+    lastSeen: number;
+    isVisible: boolean;
+}
 
-export const handler: Handler = async (event) => {
-    if (event.httpMethod === 'OPTIONS') {
-        return { statusCode: 204, headers: { 'Access-Control-Allow-Origin': '*' } };
-    }
+const userStore: Record<string, UserStatus> = {
+    admin: { subscription: null, lastSeen: 0, isVisible: false },
+    friend: { subscription: null, lastSeen: 0, isVisible: false }
+};
+
+export const handler: Handler = async (event: any) => {
+    const headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Content-Type': 'application/json'
+    };
+
+    if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers };
 
     const path = event.path.split('/').pop();
 
-    if (event.httpMethod === 'POST' && path === 'register') {
-        const { room, subscription } = JSON.parse(event.body || '{}');
-        if (!room || !subscription) return { statusCode: 400, body: 'Missing room or subscription' };
+    // POST /update-status: heartbeat and subscription update
+    if (event.httpMethod === 'POST' && path === 'update-status') {
+        const { role, subscription, isVisible } = JSON.parse(event.body || '{}');
+        if (role !== 'admin' && role !== 'friend') return { statusCode: 400, body: 'Invalid role', headers };
 
-        if (!registry[room]) registry[room] = [];
-        // Check if already registered
-        const exists = registry[room].find(s => s.endpoint === subscription.endpoint);
-        if (!exists) registry[room].push(subscription);
+        userStore[role].lastSeen = Date.now();
+        userStore[role].isVisible = isVisible;
+        if (subscription) userStore[role].subscription = subscription;
+
+        return { statusCode: 200, body: JSON.stringify({ success: true }), headers };
+    }
+
+    // GET /get-status: see how the other person is doing
+    if (event.httpMethod === 'GET' && path === 'get-status') {
+        const roleToWatch = event.queryStringParameters?.watch;
+        if (roleToWatch !== 'admin' && roleToWatch !== 'friend') return { statusCode: 400, body: 'Invalid role', headers };
+
+        const status = userStore[roleToWatch];
+        const now = Date.now();
+
+        // Consider offline if no heartbeat for 30 seconds
+        const isOnline = now - status.lastSeen < 30000;
 
         return {
             statusCode: 200,
-            body: JSON.stringify({ message: 'Registered' }),
-            headers: { 'Content-Type': 'application/json' }
+            body: JSON.stringify({
+                isOnline,
+                isVisible: status.isVisible,
+                lastActive: status.lastSeen,
+                notificationsOn: !!status.subscription
+            }),
+            headers
         };
     }
 
+    // POST /nudge: send the actual push
     if (event.httpMethod === 'POST' && path === 'nudge') {
-        const { room } = JSON.parse(event.body || '{}');
-        if (!room || !registry[room]) return { statusCode: 404, body: 'Room not found' };
+        const { targetRole } = JSON.parse(event.body || '{}');
+        const target = userStore[targetRole as 'admin' | 'friend'];
 
-        const notifications = registry[room].map(sub =>
-            webpush.sendNotification(sub, JSON.stringify({
-                title: 'Attention Nudge',
-                body: 'Someone is inviting your attention!'
-            })).catch(err => {
-                console.error('Failed to send to', sub.endpoint, err);
-                // Remove dead subscription
-                registry[room] = registry[room].filter(s => s.endpoint !== sub.endpoint);
-            })
-        );
+        if (!target || !target.subscription) {
+            return { statusCode: 404, body: 'User not registered for notifications', headers };
+        }
 
-        await Promise.all(notifications);
-
-        return {
-            statusCode: 200,
-            body: JSON.stringify({ message: 'Nudges sent' }),
-            headers: { 'Content-Type': 'application/json' }
-        };
+        try {
+            await webpush.sendNotification(target.subscription, JSON.stringify({
+                title: 'Attention!',
+                body: 'Your friend is nudging you.'
+            }));
+            return { statusCode: 200, body: JSON.stringify({ message: 'Nudge sent' }), headers };
+        } catch (err) {
+            console.error('Push error:', err);
+            return { statusCode: 500, body: 'Push failed', headers };
+        }
     }
 
-    return { statusCode: 404, body: 'Not Found' };
+    return { statusCode: 404, body: 'Not Found', headers };
 };
