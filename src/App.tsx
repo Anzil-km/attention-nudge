@@ -1,55 +1,81 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Bell, BellOff, Wifi, WifiOff, Eye, EyeOff, Send } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Bell, BellOff, Wifi, WifiOff, Eye, EyeOff, Send, User } from 'lucide-react'
 import './App.css'
 
+// Standard Role detection
+const getRole = () => {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('role') === 'friend' ? 'friend' : 'admin';
+};
+
 function App() {
+  const role = getRole();
+  const targetRole = role === 'admin' ? 'friend' : 'admin';
+
   const [permission, setPermission] = useState<NotificationPermission>(Notification.permission)
   const [isOnline, setIsOnline] = useState(navigator.onLine)
   const [isVisible, setIsVisible] = useState(!document.hidden)
-  const [lastActive, setLastActive] = useState<string>(localStorage.getItem('lastActive') || 'Never')
+  const [friendStatus, setFriendStatus] = useState({
+    isOnline: false,
+    isVisible: false,
+    lastActive: 0,
+    notificationsOn: false
+  });
 
-  // Update activity
-  const updateActivity = useCallback(() => {
-    const now = new Date().toLocaleTimeString()
-    setLastActive(now)
-    localStorage.setItem('lastActive', now)
-  }, [])
+  const subscriptionRef = useRef<any>(null);
+
+  // 1. Heartbeat to server
+  const sendHeartbeat = useCallback(async () => {
+    try {
+      await fetch('/.netlify/functions/push/update-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          role,
+          isVisible: !document.hidden,
+          subscription: subscriptionRef.current
+        })
+      });
+    } catch (e) {
+      console.error('Heartbeat failed', e);
+    }
+  }, [role]);
+
+  // 2. Poll for friend status (every 5 seconds)
+  const fetchFriendStatus = useCallback(async () => {
+    try {
+      const resp = await fetch(`/.netlify/functions/push/get-status?watch=${targetRole}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setFriendStatus(data);
+      }
+    } catch (e) {
+      console.error('Status fetch failed', e);
+    }
+  }, [targetRole]);
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true)
-    const handleOffline = () => setIsOnline(false)
-    const handleVisibilityChange = () => {
-      setIsVisible(!document.hidden)
-      if (!document.hidden) updateActivity()
-    }
+    // Initial heartbeat
+    sendHeartbeat();
 
-    window.addEventListener('online', handleOnline)
-    window.addEventListener('offline', handleOffline)
-    document.addEventListener('visibilitychange', handleVisibilityChange)
+    const hInterval = setInterval(sendHeartbeat, 15000);
+    const sInterval = setInterval(fetchFriendStatus, 5000);
 
-    // Track user interaction
-    const handleInteraction = () => updateActivity()
-    window.addEventListener('mousedown', handleInteraction)
-    window.addEventListener('keydown', handleInteraction)
+    const handleVisibility = () => {
+      setIsVisible(!document.hidden);
+      sendHeartbeat();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('online', () => setIsOnline(true));
+    window.addEventListener('offline', () => setIsOnline(false));
 
     return () => {
-      window.removeEventListener('online', handleOnline)
-      window.removeEventListener('offline', handleOffline)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      window.removeEventListener('mousedown', handleInteraction)
-      window.removeEventListener('keydown', handleInteraction)
-    }
-  }, [updateActivity])
-
-  const [room, setRoom] = useState<string>(window.location.hash.slice(1) || 'default')
-
-  useEffect(() => {
-    if (!window.location.hash) {
-      const newRoom = Math.random().toString(36).substring(7)
-      window.location.hash = newRoom
-      setRoom(newRoom)
-    }
-  }, [])
+      clearInterval(hInterval);
+      clearInterval(sInterval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [sendHeartbeat, fetchFriendStatus]);
 
   const requestPermission = async () => {
     const result = await Notification.requestPermission()
@@ -57,101 +83,103 @@ function App() {
     if (result === 'granted') {
       try {
         const { subscribeUserToPush } = await import('./pushService')
-        const subscription = await subscribeUserToPush()
-
-        // Register with server
-        await fetch('/.netlify/functions/push/register', {
-          method: 'POST',
-          body: JSON.stringify({ room, subscription }),
-          headers: { 'Content-Type': 'application/json' }
-        })
-
-        console.log('Push subscription successful.')
+        const sub = await subscribeUserToPush()
+        subscriptionRef.current = sub;
+        sendHeartbeat(); // Send subscription immediately
       } catch (err) {
-        console.error('Failed to subscribe to push:', err)
+        console.error('Push registration error', err)
       }
     }
   }
 
-  const sendAlert = async () => {
-    if (permission !== 'granted') {
-      await requestPermission()
-      if (Notification.permission !== 'granted') return
-    }
-
+  const sendNudge = async () => {
     try {
       const response = await fetch('/.netlify/functions/push/nudge', {
         method: 'POST',
-        body: JSON.stringify({ room }),
-        headers: { 'Content-Type': 'application/json' }
-      })
-
-      if (response.ok) {
-        updateActivity()
-      } else {
-        throw new Error('Failed to send nudge')
-      }
-    } catch (error) {
-      console.error('Error sending notification:', error)
-      // Fallback for demo
-      new Notification('Attention Nudge', {
-        body: 'A friendly nudge from the app (locally)!',
-        icon: '/vite.svg'
-      })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetRole })
+      });
+      if (!response.ok) alert('Could not send nudge. Friend might not have notifications on.');
+    } catch (e) {
+      alert('Error connecting to server.');
     }
+  };
+
+  if (role === 'friend') {
+    return (
+      <div className="glass-card friend-interface">
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.5rem' }}>
+          <div className="status-badge" style={{ margin: 0 }}>
+            <div className={`status-dot ${isOnline ? 'active' : 'inactive'}`} />
+            <span> {isOnline ? 'Connected' : 'Offline'}</span>
+          </div>
+        </div>
+
+        <h1>Connect with Friend</h1>
+        <p className="info-text" style={{ fontSize: '1.1rem', color: '#fff', marginBottom: '2rem' }}>
+          Allow notifications to receive gentle nudges when your friend wants your attention.
+          You don't need to keep this site open once allowed.
+        </p>
+
+        <div className="permission-toggle" onClick={requestPermission} style={{ background: permission === 'granted' ? 'rgba(99, 102, 241, 0.1)' : 'rgba(255,255,255,0.03)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            {permission === 'granted' ? <Bell className="text-indigo-400" /> : <BellOff className="text-slate-500" />}
+            <div style={{ textAlign: 'left' }}>
+              <div style={{ fontWeight: '600' }}>Notifications</div>
+              <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+                {permission === 'granted' ? 'Enabled (Ready)' : 'Tap to Enable'}
+              </div>
+            </div>
+          </div>
+          <div className={`toggle-switch ${permission === 'granted' ? 'on' : ''}`} />
+        </div>
+
+        <p className="info-text" style={{ marginTop: '2rem' }}>
+          This app respects your privacy. No tracking. Just attention.
+        </p>
+      </div>
+    );
   }
 
+  // Admin / My Interface
   return (
-    <div className="glass-card">
+    <div className="glass-card admin-interface">
       <div className="status-badge">
-        <div className={`status-dot ${isOnline && isVisible ? 'active' : isOnline ? 'away' : 'inactive'}`} />
-        <span>{isOnline ? (isVisible ? 'Online & Active' : 'Online (Background)') : 'Offline'}</span>
+        <User size={14} style={{ color: '#6366f1' }} />
+        <span style={{ fontWeight: 600 }}>My Dashboard</span>
       </div>
 
       <h1>Attention Nudge</h1>
-      <p className="info-text" style={{ marginBottom: '2rem' }}>
-        Invite attention with a single tap. Minimal, private, and respectful.
-      </p>
 
-      <div className="stats-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', textAlign: 'left' }}>
-        <div className="stat-item" style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: '12px' }}>
-          <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.25rem' }}>Connection</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            {isOnline ? <Wifi size={16} className="text-green-400" /> : <WifiOff size={16} className="text-slate-500" />}
-            {isOnline ? 'Connected' : 'Disconnected'}
-          </div>
-        </div>
-        <div className="stat-item" style={{ background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: '12px' }}>
-          <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.25rem' }}>Visibility</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            {isVisible ? <Eye size={16} className="text-blue-400" /> : <EyeOff size={16} className="text-slate-500" />}
-            {isVisible ? 'Active' : 'Background'}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginTop: '1rem', padding: '1rem', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', textAlign: 'left' }}>
-        <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.25rem' }}>Last Active</div>
-        <div style={{ fontSize: '1.1rem', fontWeight: '500' }}>{lastActive}</div>
-      </div>
-
-      <div className="permission-toggle" onClick={requestPermission}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          {permission === 'granted' ? <Bell className="text-indigo-400" /> : <BellOff className="text-slate-500" />}
+      <div className="friend-card" style={{ marginTop: '2rem', background: 'rgba(255,255,255,0.03)', borderRadius: '20px', padding: '1.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
           <div style={{ textAlign: 'left' }}>
-            <div style={{ fontWeight: '600' }}>Notifications</div>
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-              {permission === 'granted' ? 'Enabled' : 'Disabled'}
+            <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>Friend's Status</div>
+            <div style={{ fontSize: '1.2rem', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              {friendStatus.isOnline ? 'Online' : 'Offline'}
+              <div className={`status-dot ${friendStatus.isOnline ? (friendStatus.isVisible ? 'active' : 'away') : 'inactive'}`} />
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>Notifications</div>
+            <div style={{ fontWeight: '600', color: friendStatus.notificationsOn ? '#22c55e' : '#64748b' }}>
+              {friendStatus.notificationsOn ? 'Active' : 'Off'}
             </div>
           </div>
         </div>
-        <div className={`toggle-switch ${permission === 'granted' ? 'on' : ''}`} />
+
+        <div style={{ textAlign: 'left', background: 'rgba(0,0,0,0.2)', padding: '1rem', borderRadius: '12px' }}>
+          <div style={{ color: '#94a3b8', fontSize: '0.8rem' }}>Last Activity</div>
+          <div style={{ fontSize: '0.9rem' }}>
+            {friendStatus.lastActive ? new Date(friendStatus.lastActive).toLocaleTimeString() : 'Unknown'}
+          </div>
+        </div>
       </div>
 
       <button
         className="btn-primary"
-        onClick={sendAlert}
-        disabled={!isOnline}
+        onClick={sendNudge}
+        disabled={!friendStatus.notificationsOn}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.75rem' }}>
           <Send size={20} />
@@ -159,25 +187,28 @@ function App() {
         </div>
       </button>
 
-      <div style={{ marginTop: '1.5rem', padding: '1rem', border: '1px dashed rgba(255,255,255,0.1)', borderRadius: '12px' }}>
-        <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.5rem', textAlign: 'left' }}>Share link to pairing</div>
+      {!friendStatus.notificationsOn && (
+        <p className="info-text" style={{ color: '#f87171' }}>
+          Friend needs to allow notifications first.
+        </p>
+      )}
+
+      <div style={{ marginTop: '2rem', padding: '1rem', border: '1px dashed rgba(255,255,255,0.1)', borderRadius: '12px' }}>
+        <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.5rem' }}>Friend's Invite Link</div>
         <div
           onClick={() => {
-            navigator.clipboard.writeText(window.location.href);
+            const url = new URL(window.location.href);
+            url.searchParams.set('role', 'friend');
+            navigator.clipboard.writeText(url.toString());
             alert('Link copied!');
           }}
-          style={{ cursor: 'pointer', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', color: '#6366f1', textAlign: 'left', fontSize: '0.8rem' }}
+          style={{ cursor: 'pointer', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', color: '#6366f1', fontSize: '0.8rem' }}
         >
-          {window.location.href}
+          {window.location.origin}/?role=friend
         </div>
       </div>
-
-      <p className="info-text">
-        Notifications work even when the site is closed.
-        Only one permission is requested. No tracking.
-      </p>
     </div>
-  )
+  );
 }
 
 export default App
