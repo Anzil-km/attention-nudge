@@ -23,7 +23,7 @@ function App() {
 
   const subscriptionRef = useRef<any>(null);
 
-  // 1. Heartbeat to server
+  // Heartbeat to server
   const sendHeartbeat = useCallback(async () => {
     try {
       await fetch('/.netlify/functions/push/update-status', {
@@ -40,7 +40,7 @@ function App() {
     }
   }, [role]);
 
-  // 2. Poll for friend status (every 5 seconds)
+  // Poll for friend status
   const fetchFriendStatus = useCallback(async () => {
     try {
       const resp = await fetch(`/.netlify/functions/push/get-status?watch=${targetRole}`);
@@ -53,36 +53,28 @@ function App() {
     }
   }, [targetRole]);
 
-  // 0. Recover existing subscription on mount
+  // 0. Recover existing subscription and start loops
   useEffect(() => {
-    async function recoverSubscription() {
+    async function initSubscription() {
       if (Notification.permission === 'granted') {
         try {
           const registration = await navigator.serviceWorker.ready;
           const sub = await registration.pushManager.getSubscription();
           if (sub) {
-            subscriptionRef.current = sub;
+            subscriptionRef.current = sub.toJSON(); // Convert to JSON
             sendHeartbeat();
           }
         } catch (e) {
-          console.error('Failed to recover subscription', e);
+          console.error('Subscription recovery failed', e);
         }
       }
     }
-    recoverSubscription();
-  }, [sendHeartbeat]);
-
-  useEffect(() => {
-    // Initial heartbeat
-    sendHeartbeat();
+    initSubscription();
 
     const hInterval = setInterval(sendHeartbeat, 15000);
     const sInterval = setInterval(fetchFriendStatus, 5000);
 
-    const handleVisibility = () => {
-      sendHeartbeat();
-    };
-
+    const handleVisibility = () => sendHeartbeat();
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('online', () => setIsOnline(true));
     window.addEventListener('offline', () => setIsOnline(false));
@@ -94,17 +86,33 @@ function App() {
     };
   }, [sendHeartbeat, fetchFriendStatus]);
 
-  const requestPermission = async () => {
-    const result = await Notification.requestPermission()
-    setPermission(result)
-    if (result === 'granted') {
+  const toggleNotifications = async () => {
+    if (permission === 'granted' && subscriptionRef.current) {
+      // Try to unsubscribe
       try {
-        const { subscribeUserToPush } = await import('./pushService')
-        const sub = await subscribeUserToPush()
-        subscriptionRef.current = sub;
-        sendHeartbeat(); // Send subscription immediately
+        const { unsubscribeUserFromPush } = await import('./pushService')
+        await unsubscribeUserFromPush()
+        subscriptionRef.current = null
+        sendHeartbeat() // Notify server we're off
+        setPermission(Notification.permission)
       } catch (err) {
-        console.error('Push registration error', err)
+        console.error('Unsubscribe error', err)
+      }
+    } else {
+      // Subscribe
+      const result = await Notification.requestPermission()
+      setPermission(result)
+      if (result === 'granted') {
+        try {
+          const { subscribeUserToPush } = await import('./pushService')
+          const sub = await subscribeUserToPush()
+          subscriptionRef.current = sub
+          sendHeartbeat()
+        } catch (err) {
+          console.error('Push registration error', err)
+        }
+      } else if (result === 'denied') {
+        alert('Notifications are blocked by your browser. Please reset permissions in your browser settings to enable.')
       }
     }
   }
@@ -116,9 +124,9 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ targetRole })
       });
-      if (!response.ok) alert('Could not send nudge. Friend might not have notifications on.');
+      if (!response.ok) alert('Push failed. Make sure your keys are in Netlify settings.');
     } catch (e) {
-      alert('Error connecting to server.');
+      alert('Network error.');
     }
   };
 
@@ -138,17 +146,17 @@ function App() {
           You don't need to keep this site open once allowed.
         </p>
 
-        <div className="permission-toggle" onClick={requestPermission} style={{ background: permission === 'granted' ? 'rgba(99, 102, 241, 0.1)' : 'rgba(255,255,255,0.03)' }}>
+        <div className="permission-toggle" onClick={toggleNotifications} style={{ background: subscriptionRef.current ? 'rgba(99, 102, 241, 0.1)' : 'rgba(255,255,255,0.03)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-            {permission === 'granted' ? <Bell className="text-indigo-400" /> : <BellOff className="text-slate-500" />}
+            {subscriptionRef.current ? <Bell className="text-indigo-400" /> : <BellOff className="text-slate-500" />}
             <div style={{ textAlign: 'left' }}>
               <div style={{ fontWeight: '600' }}>Notifications</div>
               <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-                {permission === 'granted' ? 'Enabled (Ready)' : 'Tap to Enable'}
+                {subscriptionRef.current ? 'Enabled (Ready)' : 'Tap to Enable'}
               </div>
             </div>
           </div>
-          <div className={`toggle-switch ${permission === 'granted' ? 'on' : ''}`} />
+          <div className={`toggle-switch ${subscriptionRef.current ? 'on' : ''}`} />
         </div>
 
         <p className="info-text" style={{ marginTop: '2rem' }}>
@@ -158,7 +166,6 @@ function App() {
     );
   }
 
-  // Admin / My Interface
   return (
     <div className="glass-card admin-interface">
       <div className="status-badge">
@@ -211,7 +218,7 @@ function App() {
       )}
 
       <div style={{ marginTop: '2rem', padding: '1rem', border: '1px dashed rgba(255,255,255,0.1)', borderRadius: '12px' }}>
-        <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.5rem' }}>Friend's Invite Link</div>
+        <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.5rem' }}>Invite your partner</div>
         <div
           onClick={() => {
             const url = new URL(window.location.href);
