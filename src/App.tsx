@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Bell, BellOff, Wifi, WifiOff, Eye, EyeOff, Send, User } from 'lucide-react'
+import { Bell, BellOff, Send, User } from 'lucide-react'
 import './App.css'
 
 // Standard Role detection
@@ -14,7 +14,6 @@ function App() {
 
   const [permission, setPermission] = useState<NotificationPermission>(Notification.permission)
   const [isOnline, setIsOnline] = useState(navigator.onLine)
-  const [isVisible, setIsVisible] = useState(!document.hidden)
   const [friendStatus, setFriendStatus] = useState({
     isOnline: false,
     isVisible: false,
@@ -62,7 +61,6 @@ function App() {
     const sInterval = setInterval(fetchFriendStatus, 5000);
 
     const handleVisibility = () => {
-      setIsVisible(!document.hidden);
       sendHeartbeat();
     };
 
