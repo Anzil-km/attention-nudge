@@ -53,6 +53,25 @@ function App() {
     }
   }, [targetRole]);
 
+  // 0. Recover existing subscription on mount
+  useEffect(() => {
+    async function recoverSubscription() {
+      if (Notification.permission === 'granted') {
+        try {
+          const registration = await navigator.serviceWorker.ready;
+          const sub = await registration.pushManager.getSubscription();
+          if (sub) {
+            subscriptionRef.current = sub;
+            sendHeartbeat();
+          }
+        } catch (e) {
+          console.error('Failed to recover subscription', e);
+        }
+      }
+    }
+    recoverSubscription();
+  }, [sendHeartbeat]);
+
   useEffect(() => {
     // Initial heartbeat
     sendHeartbeat();
