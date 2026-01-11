@@ -1,0 +1,29 @@
+/* Custom styles for components used in App.tsx */
+.text-green-400 {
+  color: #22c55e;
+}
+
+.text-blue-400 {
+  color: #60a5fa;
+}
+
+.text-indigo-400 {
+  color: #818cf8;
+}
+
+.text-slate-500 {
+  color: #64748b;
+}
+
+.stats-grid {
+  margin-top: 1rem;
+}
+
+.stat-item {
+  transition: transform 0.2s;
+}
+
+.stat-item:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.05) !important;
+}
